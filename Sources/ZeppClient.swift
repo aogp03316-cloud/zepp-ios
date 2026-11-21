@@ -48,7 +48,7 @@ final class ZeppClient {
     // MARK: - 一、登录拿 access code -> login_token
     func login(account: String, password: String) async throws -> String {
         var acc = account.trimmingCharacters(in: .whitespaces)
-        if !acc.hasPrefix("+") { acc = "+86" + acc }
+        if !acc.hasPrefix("+") && !acc.contains("@") { acc = "+86" + acc }
         guard let url = URL(string: "https://api-user.huami.com/registrations/\(acc)/tokens") else {
             throw ZeppError.message("URL 构造失败")
         }
