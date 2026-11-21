@@ -223,7 +223,12 @@ final class ZeppClient {
         let acc = account.trimmingCharacters(in: .whitespacesAndNewlines)
         let code = try await fetchAccessCode(account: acc, password: password)
         let (loginToken, appTokenOpt) = try await exchange(code: code, isEmail: acc.contains("@"))
-        let appToken = try appTokenOpt ?? await getAppToken(loginToken: loginToken)
+        let appToken: String
+        if let t = appTokenOpt {
+            appToken = t
+        } else {
+            appToken = try await getAppToken(loginToken: loginToken)
+        }
         return try await updateSteps(loginToken: loginToken, appToken: appToken, steps: steps)
     }
 
