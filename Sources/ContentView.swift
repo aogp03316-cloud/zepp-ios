@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var stepsText = "23800"
     @State private var busy = false
     @State private var box: ResultBox?
+    @State private var showGuide = true
 
     struct ResultBox: Equatable {
         let ok: Bool
@@ -14,22 +15,21 @@ struct ContentView: View {
     }
 
     private let quick = ["18000", "23800", "28800", "33333"]
+    private let zeppStoreURL = URL(string: "https://apps.apple.com/cn/app/id938688461")!
 
     var body: some View {
         ScrollView {
             VStack(spacing: 14) {
                 header
-                card {
-                    field("Zepp 手机号", text: $account, keyboard: .numberPad, secure: false, placeholder: "11 位手机号")
-                    field("Zepp 密码", text: $password, keyboard: .default, secure: true, placeholder: "登录密码")
-                }
-                card { stepsBlock }
+                loginCard
+                if showGuide { guideCard }
+                stepsCard
                 primaryButton
                 if let box { resultCard(box) }
-                card { tips }
+                footer
             }
             .padding(.horizontal, 16)
-            .padding(.top, 8)
+            .padding(.top, 10)
             .padding(.bottom, 28)
         }
         .background(Color(.systemGroupedBackground).ignoresSafeArea())
@@ -38,46 +38,80 @@ struct ContentView: View {
         .onAppear { if account.isEmpty { account = savedAccount } }
     }
 
-    // MARK: - 区块
-
+    // MARK: - 顶部
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(spacing: 8) {
+            Image(systemName: "figure.walk.motion")
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 56, height: 56)
+                .background(
+                    LinearGradient(colors: [Color.accentColor, Color.accentColor.opacity(0.65)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
             Text("步数同步")
-                .font(.largeTitle.bold())
-            Text("改 Zepp 数据 → 微信运动自动读")
-                .font(.subheadline)
+                .font(.title2.bold())
+
+            Text("改 Zepp 数据，微信运动自动读")
+                .font(.footnote)
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
         .padding(.bottom, 2)
     }
 
-    private func field(_ title: String, text: Binding<String>,
-                       keyboard: UIKeyboardType, secure: Bool, placeholder: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Group {
-                if secure {
-                    SecureField(placeholder, text: text)
-                } else {
-                    TextField(placeholder, text: text)
-                        .keyboardType(keyboard)
+    // MARK: - 登录
+    private var loginCard: some View {
+        card {
+            field("Zepp 手机号", text: $account, keyboard: .numberPad, secure: false, placeholder: "11 位手机号")
+            field("Zepp 密码", text: $password, keyboard: .default, secure: true, placeholder: "登录密码")
+
+            Divider()
+
+            Link(destination: zeppStoreURL) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle.fill")
+                    Text("还没有账号？去 App Store 下载 Zepp Life")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
                 }
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(Color.accentColor)
             }
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .padding(.horizontal, 12)
-            .padding(.vertical, 12)
-            .background(Color(.tertiarySystemFill))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            Text("注册用手机号 + 短信验证码；注册完回这里填手机号密码登录")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private var stepsBlock: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    // MARK: - 首次引导
+    private var guideCard: some View {
+        card {
+            HStack {
+                Text("首次使用 3 步")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("收起") { withAnimation { showGuide = false } }
+                    .font(.caption)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+            }
+            stepRow("1", "下载 Zepp Life 并用手机号注册 / 登录")
+            stepRow("2", "微信 → 微信运动 → 设置 → 数据来源 → 添加「Zepp Life」")
+            stepRow("3", "回这里点同步，微信运动下拉刷新")
+        }
+    }
+
+    // MARK: - 步数
+    private var stepsCard: some View {
+        card {
             Text("目标步数")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -117,6 +151,7 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - 主按钮
     private var primaryButton: some View {
         Button {
             Task { await run() }
@@ -128,7 +163,7 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 15)
-            .background(canSubmit ? Color.accentColor : Color.gray.opacity(0.4))
+            .background(canSubmit ? Color.accentColor : Color.gray.opacity(0.35))
             .foregroundStyle(.white)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
@@ -140,6 +175,7 @@ struct ContentView: View {
         !busy && !account.isEmpty && !password.isEmpty
     }
 
+    // MARK: - 结果
     private func resultCard(_ b: ResultBox) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: b.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
@@ -161,18 +197,43 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    private var tips: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("怎么用")
+    private var footer: some View {
+        VStack(spacing: 4) {
+            Text("账号只存在本机，不上传任何服务器")
+            Text("v1.1")
+                .foregroundStyle(.tertiary)
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .padding(.top, 6)
+    }
+
+    // MARK: - 组件
+
+    private func field(_ title: String, text: Binding<String>,
+                       keyboard: UIKeyboardType, secure: Bool, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            tipRow("1", "微信 → 微信运动 → 设置 → 数据来源 → 添加「Zepp Life」")
-            tipRow("2", "这里点开始同步，回微信运动下拉刷新，等 1–3 分钟")
-            tipRow("3", "微信读的是 Zepp 的数据，不需要健康权限")
+            Group {
+                if secure {
+                    SecureField(placeholder, text: text)
+                } else {
+                    TextField(placeholder, text: text)
+                        .keyboardType(keyboard)
+                }
+            }
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 12)
+            .background(Color(.tertiarySystemFill))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
 
-    private func tipRow(_ n: String, _ text: String) -> some View {
+    private func stepRow(_ n: String, _ text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text(n)
                 .font(.caption2.weight(.bold))
@@ -211,7 +272,7 @@ struct ContentView: View {
             let lowered = raw.lowercased()
             if lowered.contains("success") || raw.contains("\"code\":0") || raw.contains("\"code\": 0") {
                 box = ResultBox(ok: true,
-                                text: "\(steps) 步已提交。\n打开微信运动下拉刷新，等 1–3 分钟。\n返回：\(raw.prefix(120))")
+                                text: "\(steps) 步已提交。\n打开微信运动下拉刷新，等 1–3 分钟。")
             } else {
                 box = ResultBox(ok: false, text: "接口返回：\(raw.prefix(220))")
             }
