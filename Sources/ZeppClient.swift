@@ -8,52 +8,56 @@ enum ZeppError: LocalizedError {
     }
 }
 
-/// 拦截 302，拿到华米登录的 Location（里面有 access=CODE 或 error=401）
-final class RedirectCatcher: NSObject, URLSessionTaskDelegate {
-    private let lock = NSLock()
-    private var _location: String?
-    var location: String? {
-        get { lock.lock(); defer { lock.unlock() }; return _location }
-        set { lock.lock(); _location = newValue; lock.unlock() }
-    }
-    func reset() { location = nil }
-
-    func urlSession(_ session: URLSession,
-                    task: URLSessionTask,
-                    willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest,
-                    completionHandler: @escaping (URLRequest?) -> Void) {
-        location = request.url?.absoluteString
-        completionHandler(nil)   // 不跟随重定向
-    }
-}
-
 final class ZeppClient {
     static let shared = ZeppClient()
 
-    private let catcher = RedirectCatcher()
     private let session: URLSession
     private let deviceId = "2C8B4939-0CCD-4E94-8CBA-CB8EA6E613A1"
     private let bandDeviceId = "DA932FFFFE8816E7"
 
     private init() {
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 25
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 30
+        cfg.timeoutIntervalForResource = 60
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         cfg.httpAdditionalHeaders = [
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+            "Accept": "*/*"
         ]
-        session = URLSession(configuration: cfg, delegate: catcher, delegateQueue: nil)
+        session = URLSession(configuration: cfg)
     }
 
-    // MARK: - 一、登录拿 access code -> login_token
-    func login(account: String, password: String) async throws -> String {
-        var acc = account.trimmingCharacters(in: .whitespaces)
-        if !acc.hasPrefix("+") && !acc.contains("@") { acc = "+86" + acc }
-        guard let url = URL(string: "https://api-user.huami.com/registrations/\(acc)/tokens") else {
-            throw ZeppError.message("URL 构造失败")
+    // MARK: - 通用请求（带网络错误翻译）
+    private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        do {
+            let (data, resp) = try await session.data(for: req)
+            guard let http = resp as? HTTPURLResponse else {
+                throw ZeppError.message("响应异常")
+            }
+            return (data, http)
+        } catch let e as URLError {
+            let hint: String
+            switch e.code {
+            case .notConnectedToInternet: hint = "手机没联网"
+            case .timedOut: hint = "请求超时"
+            case .cannotFindHost, .cannotConnectToHost: hint = "连不上服务器（换 WiFi/流量再试）"
+            case .networkConnectionLost: hint = "连接被中断"
+            case .secureConnectionFailed, .serverCertificateUntrusted: hint = "TLS 证书问题"
+            default: hint = e.localizedDescription
+            }
+            throw ZeppError.message("网络错误(\(e.code.rawValue))：\(hint)")
         }
-        catcher.reset()
+    }
 
+    // MARK: - 一、登录：跟随 302，从最终 URL 取 access
+    func login(account: String, password: String) async throws -> String {
+        var acc = account.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !acc.hasPrefix("+") && !acc.contains("@") { acc = "+86" + acc }
+        let encodedAcc = acc.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? acc
+
+        guard let url = URL(string: "https://api-user.huami.com/registrations/\(encodedAcc)/tokens") else {
+            throw ZeppError.message("账号格式不对")
+        }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded;charset=UTF-8", forHTTPHeaderField: "Content-Type")
@@ -61,24 +65,24 @@ final class ZeppClient {
         let body = "client_id=HuaMi&password=\(pwd)&redirect_uri=https%3A%2F%2Fs3-us-west-2.amazonaws.com%2Fhm-registration%2Fsuccesssignin.html&token=access"
         req.httpBody = body.data(using: .utf8)
 
-        _ = try await session.data(for: req)
+        let (data, http) = try await send(req)
+        let finalURL = http.url?.absoluteString ?? ""
+        let text = String(data: data, encoding: .utf8) ?? ""
 
-        guard let loc = catcher.location else {
-            throw ZeppError.message("登录无响应（网络被拦？）")
+        // 成功：最终 URL 带 access=CODE（可能在 S3 跳转后）
+        if let r = finalURL.range(of: "access=") {
+            let code = String(finalURL[r.upperBound...]).components(separatedBy: "&").first ?? ""
+            if !code.isEmpty { return try await exchangeToken(code: code) }
         }
-        if let r = loc.range(of: "access=") {
-            let code = String(loc[r.upperBound...]).components(separatedBy: "&").first ?? ""
-            if code.isEmpty { throw ZeppError.message("没拿到 access code") }
-            return try await exchangeToken(code: code)
+        // 失败：error=401
+        if finalURL.contains("error=401") {
+            throw ZeppError.message("账号或密码错误（华米 401）。邮箱账号请确认用的是注册邮箱")
         }
-        if loc.contains("error=401") {
-            throw ZeppError.message("账号或密码错误（华米 error=401）")
-        }
-        if let r = loc.range(of: "error=") {
-            let e = String(loc[r.upperBound...]).components(separatedBy: "&").first ?? ""
+        if let r = finalURL.range(of: "error=") {
+            let e = String(finalURL[r.upperBound...]).components(separatedBy: "&").first ?? ""
             throw ZeppError.message("华米拒绝登录（error=\(e)）")
         }
-        throw ZeppError.message("登录失败：\(loc)")
+        throw ZeppError.message("登录失败 HTTP \(http.statusCode)：\(text.prefix(120))")
     }
 
     private func exchangeToken(code: String) async throws -> String {
@@ -91,17 +95,17 @@ final class ZeppClient {
         let body = "app_name=com.xiaomi.hm.health&app_version=6.3.0&code=\(code)&country_code=CN&device_id=\(deviceId)&device_model=phone&grant_type=access_token&third_name=huami_phone"
         req.httpBody = body.data(using: .utf8)
 
-        let (data, _) = try await session.data(for: req)
+        let (data, _) = try await send(req)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let info = json["token_info"] as? [String: Any],
               let token = info["login_token"] as? String else {
             let text = String(data: data, encoding: .utf8) ?? ""
-            throw ZeppError.message("换取 login_token 失败：\(text.prefix(160))")
+            throw ZeppError.message("换取令牌失败：\(text.prefix(140))")
         }
         return token
     }
 
-    // MARK: - 二、拿 app_token
+    // MARK: - 二、app_token
     func getAppToken(loginToken: String) async throws -> String {
         var comps = URLComponents(string: "https://account-cn.huami.com/v1/client/app_tokens")!
         comps.queryItems = [
@@ -110,12 +114,14 @@ final class ZeppClient {
             .init(name: "login_token", value: loginToken),
             .init(name: "os_version", value: "4.1.0")
         ]
-        let (data, _) = try await session.data(from: comps.url!)
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "GET"
+        let (data, _) = try await send(req)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let info = json["token_info"] as? [String: Any],
               let token = info["app_token"] as? String else {
             let text = String(data: data, encoding: .utf8) ?? ""
-            throw ZeppError.message("获取 app_token 失败：\(text.prefix(160))")
+            throw ZeppError.message("取 app_token 失败：\(text.prefix(140))")
         }
         return token
     }
@@ -142,8 +148,8 @@ final class ZeppClient {
         let body = "userid=\(loginToken)&last_sync_data_time=\(ts)&device_type=0&last_deviceid=\(bandDeviceId)&data_json=\(tpl)"
         req.httpBody = body.data(using: .utf8)
 
-        let (data, _) = try await session.data(for: req)
-        return String(data: data, encoding: .utf8) ?? "(无返回)"
+        let (data, _) = try await send(req)
+        return String(data: data, encoding: .utf8) ?? "(空返回)"
     }
 
     // MARK: - 一次完整流程
