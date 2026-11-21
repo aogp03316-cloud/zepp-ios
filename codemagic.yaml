@@ -1,0 +1,26 @@
+workflows:
+  zepp-unsigned:
+    name: Build Zepp steps IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      xcode: latest
+    scripts:
+      - name: Install xcodegen
+        script: brew install xcodegen
+      - name: Generate Xcode project
+        script: xcodegen generate
+      - name: Build unsigned app
+        script: |
+          xcodebuild -project ZeppSteps.xcodeproj -scheme ZeppSteps -sdk iphoneos \
+            -configuration Release -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO
+      - name: Package IPA
+        script: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/ZeppSteps.app Payload/
+          zip -qr ZeppSteps-unsigned.ipa Payload
+          ls -lh ZeppSteps-unsigned.ipa
+    artifacts:
+      - ZeppSteps-unsigned.ipa
