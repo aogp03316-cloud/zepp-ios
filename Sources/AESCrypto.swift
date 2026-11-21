@@ -28,6 +28,6 @@ enum AESCrypto {
             }
         }
         guard status == kCCSuccess else { return nil }
-        return out.prefix(numBytes)
+        return Data(out.prefix(numBytes))
     }
 }
