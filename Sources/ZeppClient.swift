@@ -14,9 +14,9 @@ final class ZeppClient {
     private let session: URLSession
     private let deviceId = "2C8B4939-0CCD-4E94-8CBA-CB8EA6E613A1"
     private let bandDeviceId = "DA932FFFFE8816E7"
-    // 新版 MiFit 客户端标识（老 UA 会被风控）
     private let appUA = "MiFit6.14.0 (M2007J1SC; Android 12; Density/2.75)"
     private let appVersion = "6.14.0"
+    private let dnList = "account.zepp.com,api-user.zepp.com,api-mifit.zepp.com,api-watch.zepp.com,app-analytics.zepp.com,api-analytics.huami.com,auth.zepp.com"
 
     private init() {
         let cfg = URLSessionConfiguration.default
@@ -54,13 +54,10 @@ final class ZeppClient {
         }
     }
 
-    // MARK: - 一、登录（新接口 + AES 加密）
-    func login(account: String, password: String) async throws -> String {
-        let acc = account.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // 明文参数（顺序与 MiFit 客户端一致）
+    // MARK: - 一、登录（新接口 + AES 加密）→ 拿 access code
+    private func fetchAccessCode(account: String, password: String) async throws -> String {
         let pairs: [(String, String)] = [
-            ("emailOrPhone", acc),
+            ("emailOrPhone", account),
             ("password", password),
             ("state", "REDIRECTION"),
             ("client_id", "HuaMi"),
@@ -72,7 +69,6 @@ final class ZeppClient {
         guard let cipher = AESCrypto.encryptCBC(Data(query.utf8)) else {
             throw ZeppError.message("加密失败")
         }
-
         guard let url = URL(string: "https://api-user.zepp.com/v2/registrations/tokens") else {
             throw ZeppError.message("URL 错误")
         }
@@ -93,7 +89,7 @@ final class ZeppClient {
 
         if let r = finalURL.range(of: "access=") {
             let code = String(finalURL[r.upperBound...]).components(separatedBy: "&").first ?? ""
-            if !code.isEmpty { return try await exchangeToken(code: code) }
+            if !code.isEmpty { return code }
         }
         if finalURL.contains("error=401") {
             throw ZeppError.message("账号或密码错误（华米 401）。邮箱账号请确认用的是注册邮箱")
@@ -108,31 +104,68 @@ final class ZeppClient {
         throw ZeppError.message("登录失败 HTTP \(http.statusCode)：\(body.prefix(140))")
     }
 
-    private func exchangeToken(code: String) async throws -> String {
+    // MARK: - 二、换令牌（邮箱 / 手机号走不同分支）
+    private func exchange(code: String, isEmail: Bool) async throws -> (loginToken: String, appToken: String?) {
         guard let url = URL(string: "https://account.huami.com/v2/client/login") else {
             throw ZeppError.message("URL 错误")
         }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.setValue("application/x-www-form-urlencoded;charset=UTF-8", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
         req.setValue(appUA, forHTTPHeaderField: "User-Agent")
         req.setValue("com.xiaomi.hm.health", forHTTPHeaderField: "app_name")
+        req.setValue(UUID().uuidString, forHTTPHeaderField: "x-request-id")
+        req.setValue("zh-CN", forHTTPHeaderField: "accept-language")
+        req.setValue("com.xiaomi.hm.health", forHTTPHeaderField: "appname")
+        req.setValue("50818_\(appVersion)", forHTTPHeaderField: "cv")
+        req.setValue("2.0", forHTTPHeaderField: "v")
         req.setValue("android_phone", forHTTPHeaderField: "appplatform")
-        req.setValue("1", forHTTPHeaderField: "x-hm-ekv")
-        let body = "app_name=com.xiaomi.hm.health&app_version=\(appVersion)&code=\(code)&country_code=CN&device_id=\(deviceId)&device_model=phone&grant_type=access_token&third_name=huami_phone"
+
+        let body: String
+        if isEmail {
+            let dn = urlEncode(dnList)
+            let source = urlEncode("com.xiaomi.hm.health:\(appVersion):50818")
+            body = "allow_registration%3D=false"
+                + "&app_name=com.xiaomi.hm.health"
+                + "&app_version=\(appVersion)"
+                + "&code=\(code)"
+                + "&country_code=CN"
+                + "&device_id=\(deviceId)"
+                + "&device_model=android_phone"
+                + "&dn=\(dn)"
+                + "&grant_type=access_token"
+                + "&lang=zh_CN"
+                + "&os_version=1.5.0"
+                + "&source=\(source)"
+                + "&third_name=email"
+        } else {
+            body = "app_name=com.xiaomi.hm.health"
+                + "&app_version=\(appVersion)"
+                + "&code=\(code)"
+                + "&country_code=CN"
+                + "&device_id=\(deviceId)"
+                + "&device_model=phone"
+                + "&grant_type=access_token"
+                + "&third_name=huami_phone"
+        }
         req.httpBody = body.data(using: .utf8)
 
-        let (data, _) = try await send(req)
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let info = json["token_info"] as? [String: Any],
-              let token = info["login_token"] as? String else {
-            let text = String(data: data, encoding: .utf8) ?? ""
-            throw ZeppError.message("换取令牌失败：\(text.prefix(140))")
+        let (data, http) = try await send(req)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ZeppError.message("换令牌失败 HTTP \(http.statusCode)：\(text.prefix(160))")
         }
-        return token
+        if let result = json["result"] as? String, result != "ok" {
+            throw ZeppError.message("换令牌被拒：result=\(result)")
+        }
+        guard let info = json["token_info"] as? [String: Any],
+              let token = info["login_token"] as? String else {
+            throw ZeppError.message("换令牌失败：\(text.prefix(160))")
+        }
+        return (token, info["app_token"] as? String)
     }
 
-    // MARK: - 二、app_token
+    // MARK: - 三、app_token（备用：换令牌没给才调）
     func getAppToken(loginToken: String) async throws -> String {
         var comps = URLComponents(string: "https://account-cn.huami.com/v1/client/app_tokens")!
         comps.queryItems = [
@@ -154,7 +187,7 @@ final class ZeppClient {
         return token
     }
 
-    // MARK: - 三、提交步数（新版域名 + r 参数）
+    // MARK: - 四、提交步数
     func updateSteps(loginToken: String, appToken: String, steps: Int) async throws -> String {
         let date = Self.todayCN()
         var tpl = BAND_DATA_TEMPLATE
@@ -174,7 +207,6 @@ final class ZeppClient {
         req.httpMethod = "POST"
         req.setValue(appToken, forHTTPHeaderField: "apptoken")
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        // last_sync_data_time 用固定值（与官方客户端一致，避免覆盖异常）
         let body = "userid=\(loginToken)&last_sync_data_time=1597306380&device_type=0&last_deviceid=\(bandDeviceId)&data_json=\(tpl)"
         req.httpBody = body.data(using: .utf8)
 
@@ -188,8 +220,10 @@ final class ZeppClient {
 
     // MARK: - 一次完整流程
     func push(account: String, password: String, steps: Int) async throws -> String {
-        let loginToken = try await login(account: account, password: password)
-        let appToken = try await getAppToken(loginToken: loginToken)
+        let acc = account.trimmingCharacters(in: .whitespacesAndNewlines)
+        let code = try await fetchAccessCode(account: acc, password: password)
+        let (loginToken, appTokenOpt) = try await exchange(code: code, isEmail: acc.contains("@"))
+        let appToken = try appTokenOpt ?? await getAppToken(loginToken: loginToken)
         return try await updateSteps(loginToken: loginToken, appToken: appToken, steps: steps)
     }
 
