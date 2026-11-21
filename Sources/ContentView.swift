@@ -65,7 +65,7 @@ struct ContentView: View {
     // MARK: - 登录
     private var loginCard: some View {
         card {
-            field("Zepp 手机号", text: $account, keyboard: .numberPad, secure: false, placeholder: "11 位手机号")
+            field("Zepp 账号", text: $account, keyboard: .emailAddress, secure: false, placeholder: "手机号 或 注册邮箱")
             field("Zepp 密码", text: $password, keyboard: .default, secure: true, placeholder: "登录密码")
 
             Divider()
@@ -83,7 +83,7 @@ struct ContentView: View {
                 .foregroundStyle(Color.accentColor)
             }
 
-            Text("注册用手机号 + 短信验证码；注册完回这里填手机号密码登录")
+            Text("手机号可直接登录；邮箱账号请填注册时用的邮箱")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -172,7 +172,13 @@ struct ContentView: View {
     }
 
     private var canSubmit: Bool {
-        !busy && !account.isEmpty && !password.isEmpty
+        !busy && isValidAccount(account) && !password.isEmpty
+    }
+
+    private func isValidAccount(_ s: String) -> Bool {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        if t.contains("@") { return t.contains(".") && t.count >= 5 }
+        return t.count == 11 && t.allSatisfy { $0.isNumber }
     }
 
     // MARK: - 结果
@@ -260,6 +266,10 @@ struct ContentView: View {
     // MARK: - 动作
 
     private func run() async {
+        guard isValidAccount(account) else {
+            box = ResultBox(ok: false, text: "账号填 11 位手机号 或 注册邮箱")
+            return
+        }
         guard let steps = Int(stepsText), steps >= 1000, steps <= 60000 else {
             box = ResultBox(ok: false, text: "步数填 1000–60000 之间")
             return
