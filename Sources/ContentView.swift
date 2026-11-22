@@ -101,6 +101,23 @@ struct ContentView: View {
 
             Divider()
 
+            Button {
+                hideKeyboard()
+                Task { await initAccount() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "leaf.fill")
+                    Text("新号先打底：写一条 800 步")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.caption2)
+                }
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .disabled(busy || cooldownLeft > 0 || !isValidAccount(account) || password.isEmpty)
+
             Link(destination: zeppStoreURL) {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle.fill")
@@ -305,6 +322,38 @@ struct ContentView: View {
         if list.count > 5 { list = Array(list.prefix(5)) }
         UserDefaults.standard.set(list, forKey: "history")
         history = list
+    }
+
+    /// 新号打底：写一条小数据，让账号从"空号"变成"有数据"
+    private func initAccount() async {
+        guard isValidAccount(account) else {
+            box = ResultBox(ok: false, text: "账号填 11 位手机号 或 注册邮箱")
+            return
+        }
+        busy = true
+        box = nil
+        KeychainStore.save(account, for: "account")
+        KeychainStore.save(password, for: "password")
+        do {
+            let raw = try await ZeppClient.shared.push(account: account, password: password, steps: 800)
+            let lowered = raw.lowercased()
+            if lowered.contains("success") || raw.contains("\"code\":0") || raw.contains("\"code\": 0") {
+                box = ResultBox(ok: true,
+                                text: "已写入 800 步打底数据。\n现在去 Zepp Life 看看首页有没有步数，再去微信绑数据源。")
+                saveHistory("🌱 打底 800 步")
+            } else {
+                box = ResultBox(ok: false, text: "打底失败：\(raw.prefix(200))")
+            }
+        } catch {
+            let msg = error.localizedDescription
+            if msg.contains("429") {
+                cooldownUntil = Date().timeIntervalSince1970 + 900
+                box = ResultBox(ok: false, text: "华米限流（429）。15 分钟内别点。")
+            } else {
+                box = ResultBox(ok: false, text: msg)
+            }
+        }
+        busy = false
     }
 
     private func runOnce() async {
