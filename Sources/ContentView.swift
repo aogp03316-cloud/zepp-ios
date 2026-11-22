@@ -1,20 +1,18 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var account = ""
-    @State private var password = ""
-    @AppStorage("auto_run") private var autoRun = false
+    @ObservedObject private var store = AccountStore.shared
     @AppStorage("last_steps") private var lastSteps = "20000"
-    @AppStorage("last_success_at") private var lastSuccessAt = ""
-    // 冷却用时间戳（退出 App 也继续算）
     @AppStorage("cooldown_until") private var cooldownUntil: Double = 0
 
     @State private var stepsText = "20000"
     @State private var busy = false
     @State private var box: ResultBox?
     @State private var now = Date()
-    @State private var showGuide = false
-    @State private var history: [String] = []
+    @State private var showAdd = false
+    @State private var newAccount = ""
+    @State private var newPassword = ""
+    @State private var confirmDelete = false
 
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private let quick = ["12000", "20000", "23800", "28800"]
@@ -31,12 +29,15 @@ struct ContentView: View {
         ScrollView {
             VStack(spacing: 14) {
                 header
-                accountCard
-                if showGuide { guideCard }
+                accountSwitcher
+                if let cur = store.current {
+                    currentCard(cur)
+                } else {
+                    emptyCard
+                }
                 stepsCard
                 primaryButton
                 if let box { resultCard(box) }
-                if !history.isEmpty { historyCard }
                 footer
             }
             .padding(.horizontal, 16)
@@ -54,8 +55,14 @@ struct ContentView: View {
         }
         .onReceive(timer) { now = $0 }
         .onAppear {
-            loadSaved()
-            if autoRun, canSubmit { Task { await runOnce() } }
+            if lastSteps.count >= 4 { stepsText = lastSteps }
+        }
+        .sheet(isPresented: $showAdd) { addSheet }
+        .confirmationDialog("删除这个账号？", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("删除", role: .destructive) {
+                if let cur = store.current { store.remove(cur.id) }
+            }
+            Button("取消", role: .cancel) {}
         }
     }
 
@@ -70,45 +77,106 @@ struct ContentView: View {
                                            startPoint: .topLeading, endPoint: .bottomTrailing))
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             Text("步数同步").font(.title2.bold())
-            Text(lastSuccessAt.isEmpty ? "改 Zepp 数据，微信运动自动读" : "上次成功：\(lastSuccessAt)")
+            Text(store.accounts.isEmpty ? "先添加一个 Zepp 账号" : "共 \(store.accounts.count) 个账号，点卡片切换")
                 .font(.footnote).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
         .padding(.bottom, 2)
     }
 
-    // MARK: - 账号
-    private var accountCard: some View {
-        card {
-            HStack {
-                Text("账号").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button(showGuide ? "收起说明" : "怎么用") {
-                    withAnimation { showGuide.toggle() }
+    // MARK: - 账号切换
+    private var accountSwitcher: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(store.accounts) { a in
+                    Button {
+                        store.currentID = a.id
+                        box = nil
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(shortName(a.account))
+                                .font(.footnote.weight(.medium))
+                                .lineLimit(1)
+                                .foregroundStyle(store.currentID == a.id ? Color.accentColor : Color.primary)
+                            Text(a.lastRunDay.isEmpty ? "未使用" : a.lastRunDay)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .frame(width: 140, alignment: .leading)
+                        .background(store.currentID == a.id
+                                    ? Color.accentColor.opacity(0.15)
+                                    : Color(.secondarySystemGroupedBackground))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(store.currentID == a.id ? Color.accentColor : Color.clear, lineWidth: 1.5)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .font(.caption).buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                Button { showAdd = true } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: "plus").font(.system(size: 16, weight: .semibold))
+                        Text("添加").font(.caption2)
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 60, height: 48)
+                    .background(Color(.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
             }
-            field("Zepp 账号", text: $account, keyboard: .emailAddress, secure: false, placeholder: "手机号 或 注册邮箱")
-            field("Zepp 密码", text: $password, keyboard: .default, secure: true, placeholder: "登录密码")
+            .padding(.vertical, 2)
+        }
+    }
 
-            Toggle(isOn: $autoRun) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("打开 App 自动同步").font(.footnote)
-                    Text("一天一次就够，刷多了会被华米限流").font(.caption2).foregroundStyle(.secondary)
+    private func shortName(_ s: String) -> String {
+        if let at = s.firstIndex(of: "@") {
+            let name = String(s[s.startIndex..<at])
+            return name.count > 12 ? String(name.suffix(12)) + "@…" : s
+        }
+        return s
+    }
+
+    // MARK: - 当前账号
+    private func currentCard(_ cur: Account) -> some View {
+        card {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("当前账号").font(.caption).foregroundStyle(.secondary)
+                    Text(cur.account)
+                        .font(.subheadline.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !cur.lastResult.isEmpty {
+                        Text("上次：\(cur.lastResult)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
+                Spacer(minLength: 8)
+                Button {
+                    confirmDelete = true
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.footnote)
+                        .foregroundStyle(.red.opacity(0.8))
+                        .padding(8)
+                        .background(Color(.tertiarySystemFill))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
             }
-            .tint(.accentColor)
 
             Divider()
 
             Button {
                 hideKeyboard()
-                Task { await initAccount() }
+                Task { await warmUp() }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "leaf.fill")
-                    Text("新号先打底：写一条 800 步")
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text("新号先打底：写一条 800 步").fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right").font(.caption2)
                 }
@@ -116,27 +184,43 @@ struct ContentView: View {
                 .foregroundStyle(Color.accentColor)
             }
             .buttonStyle(.plain)
-            .disabled(busy || cooldownLeft > 0 || !isValidAccount(account) || password.isEmpty)
+            .disabled(busy || cooldownLeft > 0)
 
             Link(destination: zeppStoreURL) {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle.fill")
-                    Text("还没有账号？去 App Store 下载 Zepp Life")
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text("去 App Store 下载 Zepp Life").fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right").font(.caption2)
                 }
-                .font(.footnote.weight(.medium)).foregroundStyle(Color.accentColor)
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(Color.accentColor)
             }
         }
     }
 
-    private var guideCard: some View {
+    private var emptyCard: some View {
         card {
-            stepRow("1", "装 Zepp Life 登录，绑定一个设备（手环/手表），让它有步数数据")
-            stepRow("2", "微信 → 微信运动 → 设置 → 数据来源 → 添加「Zepp Life」")
-            stepRow("3", "回这里点同步；微信运动下拉刷新，等 1–3 分钟")
-            stepRow("4", "刚开通微信运动的号当天不统计，次日才显示")
+            VStack(spacing: 10) {
+                Text("还没有账号").font(.subheadline.weight(.medium))
+                Text("点上面的「+ 添加」，填 Zepp 的手机号或邮箱 + 密码")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    showAdd = true
+                } label: {
+                    Text("添加账号")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(Color.accentColor.opacity(0.15))
+                        .foregroundStyle(Color.accentColor)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(maxWidth: .infinity)
         }
     }
 
@@ -184,7 +268,7 @@ struct ContentView: View {
     private var primaryButton: some View {
         Button {
             hideKeyboard()
-            Task { await runOnce() }
+            Task { await sync() }
         } label: {
             HStack(spacing: 8) {
                 if busy { ProgressView().tint(.white) }
@@ -211,7 +295,7 @@ struct ContentView: View {
     }
 
     private var canSubmit: Bool {
-        !busy && cooldownLeft == 0 && isValidAccount(account) && !password.isEmpty
+        !busy && cooldownLeft == 0 && store.current != nil
     }
 
     // MARK: - 结果
@@ -225,7 +309,7 @@ struct ContentView: View {
                 Text(b.text).font(.footnote).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if b.ok {
-                    Text("微信没变是正常的：① 打开微信运动下拉刷新 ② 刚开的号次日才统计 ③ 明天看「昨天」的数据")
+                    Text("微信没变是正常的：① 下拉刷新微信运动 ② 刚开的号次日才统计 ③ 明天看「昨天」")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -238,56 +322,56 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    private var historyCard: some View {
-        card {
-            Text("最近记录").font(.caption).foregroundStyle(.secondary)
-            ForEach(history, id: \.self) { line in
-                Text(line).font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
     private var footer: some View {
         VStack(spacing: 4) {
             Text("账号密码存在本机钥匙串，不上传任何服务器")
-            Text("v1.3").foregroundStyle(.tertiary)
+            Text("v1.4").foregroundStyle(.tertiary)
         }
         .font(.caption2).foregroundStyle(.secondary).padding(.top, 6)
     }
 
-    // MARK: - 组件
-    private func field(_ title: String, text: Binding<String>,
-                       keyboard: UIKeyboardType, secure: Bool, placeholder: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Group {
-                if secure {
-                    SecureField(placeholder, text: text)
-                } else {
-                    TextField(placeholder, text: text).keyboardType(keyboard)
+    // MARK: - 添加账号
+    private var addSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Zepp 账号") {
+                    TextField("手机号 或 注册邮箱", text: $newAccount)
+                        .keyboardType(.emailAddress)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("登录密码", text: $newPassword)
+                }
+                Section {
+                    Button("保存并切换") { saveNew() }
+                        .disabled(!isValidAccount(newAccount) || newPassword.isEmpty)
+                } footer: {
+                    Text("账号密码只存在本机钥匙串，卸载才清除")
                 }
             }
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .padding(.horizontal, 12)
-            .padding(.vertical, 12)
-            .background(Color(.tertiarySystemFill))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .navigationTitle("添加账号")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        showAdd = false
+                        newAccount = ""
+                        newPassword = ""
+                    }
+                }
+            }
         }
     }
 
-    private func stepRow(_ n: String, _ text: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(n).font(.caption2.weight(.bold)).foregroundStyle(.secondary)
-                .frame(width: 16, height: 16)
-                .background(Color(.tertiarySystemFill))
-                .clipShape(Circle())
-            Text(text).font(.footnote).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+    private func saveNew() {
+        let a = Account(account: newAccount.trimmingCharacters(in: .whitespacesAndNewlines),
+                        password: newPassword)
+        store.add(a)
+        newAccount = ""
+        newPassword = ""
+        showAdd = false
     }
 
+    // MARK: - 组件
     @ViewBuilder
     private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) { content() }
@@ -309,38 +393,26 @@ struct ContentView: View {
         return t.count == 11 && t.allSatisfy { $0.isNumber }
     }
 
-    private func loadSaved() {
-        if account.isEmpty { account = KeychainStore.load("account") ?? "" }
-        if password.isEmpty { password = KeychainStore.load("password") ?? "" }
-        if lastSteps.count >= 4 { stepsText = lastSteps }
-        history = UserDefaults.standard.stringArray(forKey: "history") ?? []
+    private static func todayCN() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd"
+        f.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        return f.string(from: Date())
     }
 
-    private func saveHistory(_ line: String) {
-        var list = UserDefaults.standard.stringArray(forKey: "history") ?? []
-        list.insert(line, at: 0)
-        if list.count > 5 { list = Array(list.prefix(5)) }
-        UserDefaults.standard.set(list, forKey: "history")
-        history = list
-    }
-
-    /// 新号打底：写一条小数据，让账号从"空号"变成"有数据"
-    private func initAccount() async {
-        guard isValidAccount(account) else {
-            box = ResultBox(ok: false, text: "账号填 11 位手机号 或 注册邮箱")
-            return
-        }
+    private func warmUp() async {
+        guard var cur = store.current else { return }
         busy = true
         box = nil
-        KeychainStore.save(account, for: "account")
-        KeychainStore.save(password, for: "password")
         do {
-            let raw = try await ZeppClient.shared.push(account: account, password: password, steps: 800)
+            let raw = try await ZeppClient.shared.push(account: cur.account, password: cur.password, steps: 800)
             let lowered = raw.lowercased()
             if lowered.contains("success") || raw.contains("\"code\":0") || raw.contains("\"code\": 0") {
+                cur.lastRunDay = Self.todayCN()
+                cur.lastResult = "打底 800 步"
+                store.update(cur)
                 box = ResultBox(ok: true,
-                                text: "已写入 800 步打底数据。\n现在去 Zepp Life 看看首页有没有步数，再去微信绑数据源。")
-                saveHistory("🌱 打底 800 步")
+                                text: "已写入 800 步打底数据。\n现在去 Zepp Life 看看首页有没有步数。")
             } else {
                 box = ResultBox(ok: false, text: "打底失败：\(raw.prefix(200))")
             }
@@ -356,11 +428,8 @@ struct ContentView: View {
         busy = false
     }
 
-    private func runOnce() async {
-        guard isValidAccount(account) else {
-            box = ResultBox(ok: false, text: "账号填 11 位手机号 或 注册邮箱")
-            return
-        }
+    private func sync() async {
+        guard var cur = store.current else { return }
         guard let steps = Int(stepsText) else {
             box = ResultBox(ok: false, text: "步数填数字")
             return
@@ -372,33 +441,29 @@ struct ContentView: View {
 
         busy = true
         box = nil
-        KeychainStore.save(account, for: "account")
-        KeychainStore.save(password, for: "password")
         lastSteps = stepsText
 
         do {
-            let raw = try await ZeppClient.shared.push(account: account, password: password, steps: steps)
+            let raw = try await ZeppClient.shared.push(account: cur.account, password: cur.password, steps: steps)
             let lowered = raw.lowercased()
             if lowered.contains("success") || raw.contains("\"code\":0") || raw.contains("\"code\": 0") {
-                let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
-                lastSuccessAt = "\(ts) \(steps) 步"
+                cur.lastRunDay = Self.todayCN()
+                cur.lastResult = "\(steps) 步 ✅"
+                store.update(cur)
                 box = ResultBox(ok: true, text: "\(steps) 步已写入华米服务器。")
-                saveHistory("✅ \(ts)  \(steps) 步")
             } else {
+                cur.lastResult = "\(steps) 步 · 异常"
+                store.update(cur)
                 box = ResultBox(ok: false, text: "接口返回：\(raw.prefix(220))")
-                saveHistory("⚠️ \(steps) 步 · 返回异常")
             }
         } catch {
             let msg = error.localizedDescription
-            let rateLimited = msg.contains("429") || msg.lowercased().contains("too many")
-            if rateLimited {
-                cooldownUntil = Date().timeIntervalSince1970 + 900   // 15 分钟
-                box = ResultBox(ok: false, text: "华米限流了（429）。15 分钟内别点，退出这个页面也算数。")
-                saveHistory("❌ \(steps) 步 · 429 限流")
+            if msg.contains("429") {
+                cooldownUntil = Date().timeIntervalSince1970 + 900
+                box = ResultBox(ok: false, text: "华米限流（429）。15 分钟内别点，退出这个页面也算数。")
             } else {
                 cooldownUntil = Date().timeIntervalSince1970 + 30
                 box = ResultBox(ok: false, text: msg)
-                saveHistory("❌ \(steps) 步 · \(msg.prefix(40))")
             }
         }
         busy = false
