@@ -6,6 +6,15 @@ struct KeychainStore {
     private static let service = "com.yg.zeppsteps"
 
     static func save(_ value: String, for key: String) {
+        saveData(Data(value.utf8), for: key)
+    }
+
+    static func load(_ key: String) -> String? {
+        guard let data = loadData(key) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func saveData(_ data: Data, for key: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -13,12 +22,12 @@ struct KeychainStore {
         ]
         SecItemDelete(query as CFDictionary)
         var attrs = query
-        attrs[kSecValueData as String] = Data(value.utf8)
+        attrs[kSecValueData as String] = data
         attrs[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         SecItemAdd(attrs as CFDictionary, nil)
     }
 
-    static func load(_ key: String) -> String? {
+    static func loadData(_ key: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -29,7 +38,7 @@ struct KeychainStore {
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
               let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        return data
     }
 
     static func delete(_ key: String) {
